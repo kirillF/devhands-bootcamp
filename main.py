@@ -7,6 +7,8 @@ import math
 import ctypes
 from datetime import datetime
 import asyncio
+from resource import getrusage, RUSAGE_SELF
+import platform
 
 origins = ["*"]
 
@@ -19,6 +21,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+if platform.system() == "MacOS":
+    libc = ctypes.CDLL("libc.dylib")
+elif platform.system() == "Linux":
+    libc = ctypes.CDLL("libc.so.6")
+else:
+    libc = ctypes.CDLL(None)
 
 
 class ModelName(str, Enum):
@@ -36,47 +46,54 @@ async def root():
 
 
 @app.get("/abuse")
-async def abuse(cpu: int = 0, sleep: int = 0, blocking: bool = False):
+async def abuse(cpu: int = 0, sleep: int = 0, usleep: int = 0):
     response = {}
 
-    def fib(n):
-        if n <= 1:
-            return n
-        else:
-            return fib(n - 1) + fib(n - 2)
+    def cpu_abuse(cpu):
+        start = getrusage(RUSAGE_SELF).ru_utime
+        result = 0
+        k = 0
+        while True:
+            for i in range(k):
+                for j in range(i):
+                    result += (k**17 + i**13 + j**11) % (10**17 + 7)
+            k = (k + 1) % (10**17 + 7)
 
-    async def cpu_abuse(cpu):
-        start = time.time()
-        fib_num = 20
-        while time.time() - start < cpu / 1000:
-            fib(fib_num)
-        end = time.time()
+            curr = getrusage(RUSAGE_SELF).ru_utime
+            if curr - start >= cpu / 1000:
+                break
+        end = getrusage(RUSAGE_SELF).ru_utime
         response["cpu"] = {
             "duration": str(cpu) + "ms",
             "status": "ok",
-            "start": datetime.fromtimestamp(start),
-            "end": datetime.fromtimestamp(end),
-        }
-
-    async def sleep_abuse(sleep, blocking):
-        start = time.time()
-        if blocking:
-            time.sleep(sleep / 1000)
-        else:
-            await asyncio.sleep(sleep / 1000)
-        end = time.time()
-        response["sleep"] = {
-            "duration": str(sleep) + "ms",
-            "status": "ok",
-            "start": datetime.fromtimestamp(start),
-            "end": datetime.fromtimestamp(end),
+            "start": start,
+            "end": end,
         }
 
     if cpu > 0:
-        await cpu_abuse(cpu)
+        cpu_abuse(cpu)
 
     if sleep > 0:
-        await sleep_abuse(sleep, blocking)
+        start = getrusage(RUSAGE_SELF).ru_utime
+        time.sleep(sleep / 1000)
+        end = getrusage(RUSAGE_SELF).ru_utime
+        response["sleep"] = {
+            "duration": str(sleep) + "ms",
+            "status": "ok",
+            "start": start,
+            "end": end,
+        }
+
+    if usleep > 0:
+        start = getrusage(RUSAGE_SELF).ru_utime
+        libc.usleep(usleep * 1000)
+        end = getrusage(RUSAGE_SELF).ru_utime
+        response["usleep"] = {
+            "duration": str(usleep) + "ms",
+            "status": "ok",
+            "start": start,
+            "end": end,
+        }
 
     return response
 
