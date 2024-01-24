@@ -1,14 +1,19 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from enum import Enum
-import sys
 import time
-import math
 import ctypes
 from datetime import datetime
-import asyncio
 from resource import getrusage, RUSAGE_SELF
 import platform
+from dotenv import load_dotenv
+import psycopg
+from psycopg import AsyncConnection
+import aioredis
+import os
+
+load_dotenv()
+
 
 origins = ["*"]
 
@@ -23,21 +28,30 @@ app.add_middleware(
 )
 
 
+async def get_conn():
+    pool = await psycopg.create_pool(
+        database=os.getenv("POSTGRES_DB"),
+        user=os.getenv("POSTGRES_USER"),
+        password=os.getenv("POSTGRES_PASSWORD"),
+        host=os.getenv("POSTGRES_HOST"),
+    )
+    async with pool.acquire() as conn:
+        yield conn
+
+
+async def get_redis():
+    host = os.getenv("REDIS_HOST")
+    port = os.getenv("REDIS_PORT")
+    redis = await aioredis.create_redis_pool(f"redis://{host}:{port}")
+    return redis
+
+
 if platform.system() == "MacOS":
     libc = ctypes.CDLL("libc.dylib")
 elif platform.system() == "Linux":
     libc = ctypes.CDLL("libc.so.6")
 else:
     libc = ctypes.CDLL(None)
-
-
-class ModelName(str, Enum):
-    alexnet = "alexnet"
-    resnet = "resnet"
-    lenet = "lenet"
-
-
-fake_items_db = [{"item_name": "Foo"}, {"item_name": "Bar"}, {"item_name": "Baz"}]
 
 
 @app.get("/")
@@ -98,47 +112,41 @@ async def abuse(cpu: int = 0, sleep: int = 0, usleep: int = 0):
     return response
 
 
-@app.get("/items/{item_id}")
-async def read_item(item_id: int):
-    return {"item_id": item_id}
-
-
-@app.get("/users/me")
-async def read_user_me():
-    return {"user_id": "the current user"}
-
-
-@app.get("/users/{user_id}")
-async def read_user(user_id: str):
-    return {"user_id": user_id}
-
-
-@app.get("/users")
-async def read_users():
-    return ["Rick", "Morty"]
-
-
-@app.get("/models/{model_name}")
-async def get_model(model_name: ModelName):
-    if model_name == ModelName.alexnet:
-        return {"model_name": model_name, "message": "Deep Learning FTW!"}
-    if model_name.value == "lenet":
-        return {"model_name": model_name, "message": "LeCNN all the images"}
-    return {"model_name": model_name, "message": "Have some residuals"}
-
-
-@app.get("items/")
-async def read_item(skip: int = 0, limit: int = 10):
-    return fake_items_db[skip : skip + limit]
+@app.get("/warmup")
+async def warmup(conn: AsyncConnection = Depends(get_conn)):
+    for i in range(1, 6):
+        item = await get_redis().get(f"item:{i}")
+        if item is None:
+            item = await read_item(i, conn)
+            await get_redis().set(f"item:{i}", item)
 
 
 @app.get("/items/{item_id}")
-async def read_item(item_id: str, q: str = None, short: bool = False):
-    item = {"item_id": item_id}
-    if q:
-        item.update({"q": q})
-    if not short:
-        item.update(
-            {"description": "This is an amazing item that has a long description"}
-        )
+async def read_item(item_id: int, conn: AsyncConnection = Depends(get_conn)):
+    item = await conn.fetchrow("SELECT * FROM items WHERE id = $1", item_id)
     return item
+
+
+@app.get("/items")
+async def read_items(conn: AsyncConnection = Depends(get_conn)):
+    response = []
+    for i in range(1, 6):
+        result = await read_item(i, conn)
+        response.append(result)
+    return response
+
+
+@app.get("/items/cache/{item_id}")
+async def get_item_from_cache(item_id: int):
+    item = await get_redis().get(f"item:{item_id}")
+    return item
+
+
+@app.get("/items/cache")
+async def read_items_from_cache():
+    redis = await get_redis()
+    items = []
+    for i in range(1, 6):  # Fetch items with IDs from 1 to 5
+        item = await redis.get(f"item:{i}")
+        items.append(item)
+    return items
